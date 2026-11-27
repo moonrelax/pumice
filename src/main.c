@@ -6,6 +6,11 @@
 #include "core/loader.h"
 #include "core/log.h"
 #include "hle/service.h"
+#include "gpu/gpu.h"
+#include "gpu/display.h"
+#include "audio/audio.h"
+#include "input/hid.h"
+#include "fs/fs.h"
 
 static void usage(const char *prog) {
     fprintf(stderr, "usage: %s <file.nso|file.nro>\n", prog);
@@ -34,6 +39,21 @@ int main(int argc, char **argv) {
     service_manager sm;
     sm_init(&sm);
     hle_register_all(&sm);
+
+    gpu_state gpu;
+    gpu_init(&gpu);
+
+    display_state display;
+    display_init(&display, &gpu);
+
+    audio_state audio;
+    audio_init(&audio);
+
+    hid_state hid;
+    hid_init(&hid);
+
+    fs_state fs;
+    fs_init(&fs, ".");
 
     loaded_module mod = {0};
     bool ok;
@@ -69,6 +89,9 @@ int main(int argc, char **argv) {
     kernel_run(&ks);
     LOG_INFO("execution finished");
 
+    gpu_destroy(&gpu);
+    audio_destroy(&audio);
+    fs_destroy(&fs);
     mem_destroy(&as);
     return 0;
 }

@@ -1,6 +1,6 @@
 CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2
-LDFLAGS =
+LDFLAGS = -lm
 
 SRC = src/main.c \
       src/core/memory.c \
@@ -8,7 +8,12 @@ SRC = src/main.c \
       src/core/kernel.c \
       src/core/svc.c \
       src/core/loader.c \
-      src/hle/service.c
+      src/hle/service.c \
+      src/gpu/gpu.c \
+      src/gpu/display.c \
+      src/audio/audio.c \
+      src/input/hid.c \
+      src/fs/fs.c
 
 OBJ = $(SRC:.c=.o)
 BIN = pumice

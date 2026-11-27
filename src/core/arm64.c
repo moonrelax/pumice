@@ -551,6 +551,416 @@ int arm64_step(arm64_cpu *cpu) {
         return CPU_OK;
     }
 
+    /* ===== Floating-point & SIMD extensions ===== */
+
+    /* FMOV (general to FP) - Wn/Xn -> Sd/Dd */
+    if ((insn & 0x7F36FC00) == 0x1E270000) {
+        bool sf = (insn >> 31) & 1;
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+        uint64_t val = reg_get(cpu, rn);
+        if (!sf) val &= 0xFFFFFFFF;
+        cpu->v[rd] = (__uint128_t)val;
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* FMOV (FP to general) - Sd/Dd -> Wn/Xn */
+    if ((insn & 0x7F36FC00) == 0x1E260000) {
+        bool sf = (insn >> 31) & 1;
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+        uint64_t val = (uint64_t)cpu->v[rn];
+        if (!sf) val &= 0xFFFFFFFF;
+        reg_set_zr(cpu, rd, val);
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* FMOV (immediate) */
+    if ((insn & 0xFF201C00) == 0x1E201000) {
+        int rd = insn & 0x1F;
+        uint32_t imm8 = (insn >> 13) & 0xFF;
+        bool is_double = (insn >> 22) & 1;
+        if (is_double) {
+            uint64_t bits = ((uint64_t)(imm8 >> 7) << 63) |
+                            ((uint64_t)((imm8 >> 6) & 1 ? 0x3FC : 0x400) << 52) |
+                            ((uint64_t)(imm8 & 0x3F) << 46);
+            cpu->v[rd] = (__uint128_t)bits;
+        } else {
+            uint32_t bits = ((imm8 >> 7) << 31) |
+                            (((imm8 >> 6) & 1 ? 0x7C : 0x80) << 23) |
+                            ((imm8 & 0x3F) << 19);
+            cpu->v[rd] = (__uint128_t)(uint64_t)bits;
+        }
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* FADD/FSUB/FMUL/FDIV (scalar) */
+    if ((insn & 0xFF20C000) == 0x1E200800) {
+        bool is_double = (insn >> 22) & 1;
+        int rm = (insn >> 16) & 0x1F;
+        int opcode = (insn >> 12) & 0xF;
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+
+        if (is_double) {
+            union { uint64_t u; double f; } a, b, r;
+            a.u = (uint64_t)cpu->v[rn];
+            b.u = (uint64_t)cpu->v[rm];
+            switch (opcode) {
+            case 0x2: r.f = a.f + b.f; break;
+            case 0x3: r.f = a.f - b.f; break;
+            case 0x0: r.f = a.f * b.f; break;
+            case 0x1: r.f = a.f / b.f; break;
+            default: r.f = 0; break;
+            }
+            cpu->v[rd] = (__uint128_t)r.u;
+        } else {
+            union { uint32_t u; float f; } a, b, r;
+            a.u = (uint32_t)(uint64_t)cpu->v[rn];
+            b.u = (uint32_t)(uint64_t)cpu->v[rm];
+            switch (opcode) {
+            case 0x2: r.f = a.f + b.f; break;
+            case 0x3: r.f = a.f - b.f; break;
+            case 0x0: r.f = a.f * b.f; break;
+            case 0x1: r.f = a.f / b.f; break;
+            default: r.f = 0; break;
+            }
+            cpu->v[rd] = (__uint128_t)(uint64_t)r.u;
+        }
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* FCMP/FCMPE */
+    if ((insn & 0xFF20FC17) == 0x1E202000) {
+        bool is_double = (insn >> 22) & 1;
+        int rm = (insn >> 16) & 0x1F;
+        int rn = (insn >> 5) & 0x1F;
+        bool with_zero = (insn >> 3) & 1;
+
+        cpu->nzcv = 0;
+        if (is_double) {
+            union { uint64_t u; double f; } a, b;
+            a.u = (uint64_t)cpu->v[rn];
+            b.u = with_zero ? (union { uint64_t u; double f; }){.f = 0.0}.u : (uint64_t)cpu->v[rm];
+            if (a.f == b.f) cpu->nzcv = NZCV_Z | NZCV_C;
+            else if (a.f < b.f) cpu->nzcv = NZCV_N;
+            else cpu->nzcv = NZCV_C;
+        } else {
+            union { uint32_t u; float f; } a, b;
+            a.u = (uint32_t)(uint64_t)cpu->v[rn];
+            b.u = with_zero ? (union { uint32_t u; float f; }){.f = 0.0f}.u : (uint32_t)(uint64_t)cpu->v[rm];
+            if (a.f == b.f) cpu->nzcv = NZCV_Z | NZCV_C;
+            else if (a.f < b.f) cpu->nzcv = NZCV_N;
+            else cpu->nzcv = NZCV_C;
+        }
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* FCVTZS/FCVTZU (FP to integer) */
+    if ((insn & 0x7F3FFC00) == 0x1E380000) {
+        bool sf = (insn >> 31) & 1;
+        bool is_double = (insn >> 22) & 1;
+        bool is_unsigned = (insn >> 16) & 1;
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+
+        uint64_t result;
+        if (is_double) {
+            union { uint64_t u; double f; } v;
+            v.u = (uint64_t)cpu->v[rn];
+            if (is_unsigned) result = (uint64_t)v.f;
+            else result = (uint64_t)(int64_t)v.f;
+        } else {
+            union { uint32_t u; float f; } v;
+            v.u = (uint32_t)(uint64_t)cpu->v[rn];
+            if (is_unsigned) result = (uint64_t)v.f;
+            else result = (uint64_t)(int64_t)v.f;
+        }
+        if (!sf) result &= 0xFFFFFFFF;
+        reg_set_zr(cpu, rd, result);
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* SCVTF/UCVTF (integer to FP) */
+    if ((insn & 0x7F3FFC00) == 0x1E220000) {
+        bool sf = (insn >> 31) & 1;
+        bool is_double = (insn >> 22) & 1;
+        bool is_unsigned = (insn >> 16) & 1;
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+
+        uint64_t src = reg_get(cpu, rn);
+        if (!sf) src &= 0xFFFFFFFF;
+
+        if (is_double) {
+            union { uint64_t u; double f; } v;
+            if (is_unsigned) v.f = (double)src;
+            else v.f = (double)(int64_t)src;
+            cpu->v[rd] = (__uint128_t)v.u;
+        } else {
+            union { uint32_t u; float f; } v;
+            if (is_unsigned) v.f = (float)src;
+            else v.f = (float)(int64_t)src;
+            cpu->v[rd] = (__uint128_t)(uint64_t)v.u;
+        }
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* FNEG/FABS/FSQRT (scalar) */
+    if ((insn & 0xFF3FFC00) == 0x1E214000 ||
+        (insn & 0xFF3FFC00) == 0x1E20C000 ||
+        (insn & 0xFF3FFC00) == 0x1E21C000) {
+        bool is_double = (insn >> 22) & 1;
+        int op = (insn >> 15) & 3;
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+
+        if (is_double) {
+            union { uint64_t u; double f; } v;
+            v.u = (uint64_t)cpu->v[rn];
+            switch (op) {
+            case 1: v.f = -v.f; break;
+            case 0: v.f = v.f < 0 ? -v.f : v.f; break;
+            case 3: v.f = __builtin_sqrt(v.f); break;
+            default: break;
+            }
+            cpu->v[rd] = (__uint128_t)v.u;
+        } else {
+            union { uint32_t u; float f; } v;
+            v.u = (uint32_t)(uint64_t)cpu->v[rn];
+            switch (op) {
+            case 1: v.f = -v.f; break;
+            case 0: v.f = v.f < 0 ? -v.f : v.f; break;
+            case 3: v.f = __builtin_sqrtf(v.f); break;
+            default: break;
+            }
+            cpu->v[rd] = (__uint128_t)(uint64_t)v.u;
+        }
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* FCVT (single <-> double) */
+    if ((insn & 0xFFFFFC00) == 0x1E22C000) {
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+        union { uint32_t u; float f; } s;
+        s.u = (uint32_t)(uint64_t)cpu->v[rn];
+        union { uint64_t u; double f; } d;
+        d.f = (double)s.f;
+        cpu->v[rd] = (__uint128_t)d.u;
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+    if ((insn & 0xFFFFFC00) == 0x1E624000) {
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+        union { uint64_t u; double f; } d;
+        d.u = (uint64_t)cpu->v[rn];
+        union { uint32_t u; float f; } s;
+        s.f = (float)d.f;
+        cpu->v[rd] = (__uint128_t)(uint64_t)s.u;
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* LDR/STR (SIMD/FP, unsigned offset) */
+    if ((insn & 0x3F000000) == 0x3D000000) {
+        int opc = (insn >> 30) & 3;
+        int size_bits = (insn >> 23) & 1;
+        (void)size_bits;
+        bool is_load = (insn >> 22) & 1;
+        uint64_t imm12 = (insn >> 10) & 0xFFF;
+        int rn = (insn >> 5) & 0x1F;
+        int rt = insn & 0x1F;
+
+        int scale;
+        switch (opc) {
+        case 0: scale = 2; break;
+        case 1: scale = 3; break;
+        case 2: scale = 4; break;
+        default: scale = 2; break;
+        }
+
+        uint64_t offset = imm12 << scale;
+        uint64_t addr = reg_get(cpu, rn) + offset;
+
+        if (is_load) {
+            uint64_t lo = 0, hi = 0;
+            int bytes = 1 << scale;
+            if (bytes <= 8) {
+                mem_read(cpu->as, addr, &lo, bytes);
+                cpu->v[rt] = (__uint128_t)lo;
+            } else {
+                mem_read(cpu->as, addr, &lo, 8);
+                mem_read(cpu->as, addr + 8, &hi, 8);
+                cpu->v[rt] = ((__uint128_t)hi << 64) | lo;
+            }
+        } else {
+            int bytes = 1 << scale;
+            uint64_t lo = (uint64_t)cpu->v[rt];
+            if (bytes <= 8) {
+                mem_write(cpu->as, addr, &lo, bytes);
+            } else {
+                uint64_t hi = (uint64_t)(cpu->v[rt] >> 64);
+                mem_write(cpu->as, addr, &lo, 8);
+                mem_write(cpu->as, addr + 8, &hi, 8);
+            }
+        }
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* SIMD DUP (element to vector) */
+    if ((insn & 0xFFE0FC00) == 0x4E000400) {
+        int imm5 = (insn >> 16) & 0x1F;
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+
+        int size = __builtin_ctz(imm5);
+        int idx = imm5 >> (size + 1);
+        int esize = 8 << size;
+        int elems = 128 / esize;
+
+        __uint128_t src = cpu->v[rn];
+        uint64_t elem;
+        if (esize <= 64) {
+            elem = (uint64_t)(src >> (idx * esize)) & ((1ULL << esize) - 1);
+        } else {
+            elem = (uint64_t)src;
+        }
+
+        __uint128_t result = 0;
+        for (int i = 0; i < elems; i++) {
+            result |= ((__uint128_t)elem) << (i * esize);
+        }
+        cpu->v[rd] = result;
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* SIMD ADD/SUB (vector, integer) */
+    if ((insn & 0xBF20FC00) == 0x0E208400 || (insn & 0xBF20FC00) == 0x2E208400) {
+        bool is_sub = (insn >> 29) & 1;
+        bool q = (insn >> 30) & 1;
+        int size = (insn >> 22) & 3;
+        int rm = (insn >> 16) & 0x1F;
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+
+        int esize = 8 << size;
+        int elems = (q ? 128 : 64) / esize;
+
+        __uint128_t a = cpu->v[rn];
+        __uint128_t b = cpu->v[rm];
+        __uint128_t result = 0;
+        uint64_t mask = (esize < 64) ? ((1ULL << esize) - 1) : ~0ULL;
+
+        for (int i = 0; i < elems; i++) {
+            uint64_t ea = (uint64_t)(a >> (i * esize)) & mask;
+            uint64_t eb = (uint64_t)(b >> (i * esize)) & mask;
+            uint64_t er = is_sub ? (ea - eb) & mask : (ea + eb) & mask;
+            result |= ((__uint128_t)er) << (i * esize);
+        }
+        cpu->v[rd] = result;
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* SIMD FADD/FSUB/FMUL (vector, float) */
+    if ((insn & 0xBFA0FC00) == 0x0E20D400 ||
+        (insn & 0xBFA0FC00) == 0x0EA0D400 ||
+        (insn & 0xBFA0FC00) == 0x2E20D400) {
+        bool q = (insn >> 30) & 1;
+        bool sz = (insn >> 22) & 1;
+        int rm = (insn >> 16) & 0x1F;
+        int rn = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+        int op = (insn >> 29) & 1;
+        bool is_mul = ((insn >> 11) & 1) == 0 && op == 1;
+        (void)is_mul;
+
+        int esize = sz ? 64 : 32;
+        int elems = (q ? 128 : 64) / esize;
+
+        __uint128_t result = 0;
+        for (int i = 0; i < elems; i++) {
+            if (sz) {
+                union { uint64_t u; double f; } a, b, r;
+                a.u = (uint64_t)(cpu->v[rn] >> (i * 64));
+                b.u = (uint64_t)(cpu->v[rm] >> (i * 64));
+                uint32_t opbits = (insn >> 23) & 0x1F;
+                if (opbits & 4) r.f = a.f - b.f;
+                else r.f = a.f + b.f;
+                result |= ((__uint128_t)r.u) << (i * 64);
+            } else {
+                union { uint32_t u; float f; } a, b, r;
+                a.u = (uint32_t)(uint64_t)(cpu->v[rn] >> (i * 32));
+                b.u = (uint32_t)(uint64_t)(cpu->v[rm] >> (i * 32));
+                uint32_t opbits = (insn >> 23) & 0x1F;
+                if (opbits & 4) r.f = a.f - b.f;
+                else r.f = a.f + b.f;
+                result |= ((__uint128_t)(uint64_t)r.u) << (i * 32);
+            }
+        }
+        cpu->v[rd] = result;
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* MOVI/MVNI (SIMD immediate) */
+    if ((insn & 0xBFF89C00) == 0x0F000400) {
+        bool q = (insn >> 30) & 1;
+        uint8_t abc = (insn >> 16) & 0x7;
+        uint8_t defgh = (insn >> 5) & 0x1F;
+        int rd = insn & 0x1F;
+        uint8_t imm8 = (abc << 5) | defgh;
+
+        uint64_t val = imm8;
+        __uint128_t result = 0;
+        for (int i = 0; i < (q ? 16 : 8); i++) {
+            result |= ((__uint128_t)val) << (i * 8);
+        }
+        cpu->v[rd] = result;
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* MRS (FPCR/FPSR) */
+    if ((insn & 0xFFFFFFE0) == 0xD53B4400) {
+        int rt = insn & 0x1F;
+        reg_set_zr(cpu, rt, cpu->fpcr);
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+    if ((insn & 0xFFFFFFE0) == 0xD53B4420) {
+        int rt = insn & 0x1F;
+        reg_set_zr(cpu, rt, cpu->fpsr);
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
+    /* MSR (FPCR/FPSR) */
+    if ((insn & 0xFFFFFFE0) == 0xD51B4400) {
+        int rt = insn & 0x1F;
+        cpu->fpcr = (uint32_t)reg_get(cpu, rt);
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+    if ((insn & 0xFFFFFFE0) == 0xD51B4420) {
+        int rt = insn & 0x1F;
+        cpu->fpsr = (uint32_t)reg_get(cpu, rt);
+        cpu->pc += 4;
+        return CPU_OK;
+    }
+
 unhandled:
     LOG_ERR("unhandled insn 0x%08X at 0x%lx", insn, cpu->pc);
     cpu->running = false;
